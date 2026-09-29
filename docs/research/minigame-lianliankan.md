@@ -1,12 +1,18 @@
-# 在 WebGAL 里加入连连看
+# 在 WebGAL 里加入小题和小游戏
 
 ## 结论
 
-可以加。连连看应当做成一条会暂停剧本的命令，玩完把结果写进游戏变量，再让原来的视觉小说脚本继续走。
+三种玩法都能融进现在的视觉小说，差别只在要不要新命令。
 
-WebGAL 的运行时是「读一句脚本、改舞台、播演出、等玩家点下一步」。它没有第二种游戏主循环，也没有插件槽可以把一整款小游戏换进去。现成的暂停点只有选项（`choose`）和填空（`getUserInput`）。连连看沿用同一条路：命令挡住下一步，自己画棋盘，结束时写入变量并调用 `nextSentence()`。
+| 玩法 | 现在能不能写进剧本 | 接入方式 |
+| --- | --- | --- |
+| 一道题，ABCD 四个选项 | 能，用现有 `choose` | 选项跳到标签，对的那支给变量加分，再汇合 |
+| 卡片翻转记忆 | 要加一条命令 | 和连连看共用 `miniGame`，规则换成翻两张配一对 |
+| 连连看 | 要加一条命令 | `miniGame:lianliankan`，清空或超时后写回变量 |
 
-Forge 的生成管线现在不会写出这种命令。引擎先能跑，校验和语法合同再认这条命令，生成出来的剧本才能用它。
+WebGAL 的运行时是「读一句脚本、改舞台、播演出、等玩家点下一步」。新玩法都停在这一句上，结束时把结果放进游戏变量，下一句继续讲故事。背景、立绘和 BGM 保持进入之前的状态。
+
+ABCD 已经在生成管线的命令白名单里。翻牌和连连看要等语法合同认了 `miniGame`，模型才会把它写进生成剧本。
 
 ## 引擎现在怎么跑
 
@@ -21,9 +27,61 @@ Forge 的生成管线现在不会写出这种命令。引擎先能跑，校验�
 
 因此小游戏界面必须盖在点击层上面，并自己吃掉点击。画在 Pixi 舞台上时，点击会先落到透明层上，棋盘收不到事件。
 
+## ABCD 怎么接
+
+一道四选一用现在的选项就能写完。玩家点哪一项，脚本跳到对应标签；正确项加分，四条分支再跳回同一个汇合点。
+
+```webgal
+setVar:score=0;
+:下面这句话出自哪本书？;
+choose:A. 围城:opt_a|B. 边城:opt_b|C. 家:opt_c|D. 骆驼祥子:opt_d;
+
+label:opt_a;
+setVar:score=score+1;
+:答对了。;
+jumpLabel:after_q1;
+
+label:opt_b;
+:不是这一本。;
+jumpLabel:after_q1;
+
+label:opt_c;
+:不是这一本。;
+jumpLabel:after_q1;
+
+label:opt_d;
+:不是这一本。;
+jumpLabel:after_q1;
+
+label:after_q1;
+:当前得分是 {score}。;
+changeScene:ending_good.txt -when=score>=1;
+changeScene:ending_retry.txt;
+```
+
+`choose` 已经会挡住点击、自动播放和快进演算，并把按钮画在点击层上面。选项个数不限，写四项就是 ABCD。每个标签结束后必须 `jumpLabel` 到汇合点，否则脚本会顺序掉进下一个选项的正文。
+
+这适合「剧情里插一道题」：题干用台词，四个选项用现在的选项按钮，对错改分数或好感。Forge 生成剧本时已经会写 `choose` 和 `setVar`，把题干和标准答案放进叙事计划就能产出这种场景。
+
+若要试卷感，再加一条薄命令：限时、点选后标出正确项、连做几题再给一个总分。那条命令仍然沿用 `choose` 的暂停方式，只是界面换成题目卡片，结果写成 `quiz_result` 和 `score`。第一版不必做这条命令，现有选项够用。
+
+## 翻牌记忆怎么接
+
+翻牌和连连看走同一条 `miniGame`。棋盘是若干对背面朝上的卡片，一次翻开两张，图案相同就留下，不同就盖回去。清空、超时，或步数用尽时写回变量。
+
+```webgal
+miniGame:memory -pairs=6 -time=45 -result=mem_result -moves=mem_moves;
+:你用了 {mem_moves} 步。 -when=mem_result=="clear";
+:时间到了，还有卡片没配对。 -when=mem_result=="timeout";
+```
+
+规则比连连看少一块：不需要两折寻路，只比较两张牌的图案。卡片图可以用立绘或道具图。棋盘、已翻开的位置和剩余步数留在界面模块里，剧本只接收结果和步数。
+
+读档、快进和层级限制与连连看相同，见下文。读档会重开这一局，不接着翻到一半的牌面。
+
 ## 连连看怎么接
 
-建议一条通用命令，第一种游戏是连连看：
+连连看是同一种命令的另一种规则：
 
 ```webgal
 miniGame:lianliankan -cols=8 -rows=6 -time=60 -result=lk_result -score=lk_score;
@@ -63,12 +121,13 @@ Forge 后端的 `_WEBGAL_CONTROL_COMMANDS`（`webgal_backend/scene_validation.py
 
 - `src/Core/controller/scene/sceneInterface.ts`：在 `commandType` 末尾加 `miniGame`。枚举是数字，插在中间会改掉已有命令的值。
 - `src/Core/parser/sceneParser.ts`：注册 `miniGame`。解析器使用这份 `SCRIPT_CONFIG`，不需要另做一套命令表。
-- 新目录 `src/Core/gameScripts/miniGame/`：命令、连连看规则、棋盘界面。
+- 新目录 `src/Core/gameScripts/miniGame/`：共用命令，下面分 `memory` 和 `lianliankan` 两套规则与界面。
 - 舞台样式：小游戏层高于 `#FullScreenClick`。
+- ABCD 沿用 `src/Core/gameScripts/choose/`，第一版不改引擎。
 
 生成管线，等手写脚本验证通过后再改：
 
 - `webgal_backend/contracts/syntax.md`
 - `webgal_backend/scene_validation.py` 的命令白名单
 
-第一版只做一种棋盘、倒计时、清空或超时、两个变量回写，以及预览时的默认结果。读档重开，不做中途续局，也不让模型自动编关卡。
+第一版先用现有 `choose` 写 ABCD。小游戏只做翻牌或连连看里的一种：倒计时、清空或超时、两个变量回写，以及预览时的默认结果。读档重开，不做中途续局，也不让模型自动编关卡。
